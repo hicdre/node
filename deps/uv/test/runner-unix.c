@@ -22,9 +22,11 @@
 #include "runner-unix.h"
 #include "runner.h"
 
+#include <limits.h>
 #include <stdint.h> /* uintptr_t */
 
-#include <unistd.h> /* usleep */
+#include <errno.h>
+#include <unistd.h> /* readlink, usleep */
 #include <string.h> /* strdup */
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,20 +41,23 @@
 
 
 /* Do platform-specific initialization. */
-void platform_init(int argc, char **argv) {
-  const char* var = getenv("UV_RUN_AS_ROOT");
+int platform_init(int argc, char **argv) {
+  const char* tap;
 
-  /* Running the tests as root is not smart - don't do it. */
-  if (getuid() == 0 && (var == NULL || atoi(var) <= 0)) {
-    fprintf(stderr, "Running the tests as root is not safe.\n");
-    exit(1);
-  }
+  tap = getenv("UV_TAP_OUTPUT");
+  tap_output = (tap != NULL && atoi(tap) > 0);
 
   /* Disable stdio output buffering. */
   setvbuf(stdout, NULL, _IONBF, 0);
   setvbuf(stderr, NULL, _IONBF, 0);
-  strcpy(executable_path, argv[0]);
   signal(SIGPIPE, SIG_IGN);
+
+  if (realpath(argv[0], executable_path) == NULL) {
+    perror("realpath");
+    return -1;
+  }
+
+  return 0;
 }
 
 
@@ -63,6 +68,7 @@ int process_start(char* name, char* part, process_info_t* p, int is_helper) {
   const char* arg;
   char* args[16];
   int n;
+  pid_t pid;
 
   stdout_file = tmpfile();
   if (!stdout_file) {
@@ -73,7 +79,7 @@ int process_start(char* name, char* part, process_info_t* p, int is_helper) {
   p->terminated = 0;
   p->status = 0;
 
-  pid_t pid = fork();
+  pid = fork();
 
   if (pid < 0) {
     perror("fork");
@@ -146,8 +152,11 @@ static void* dowait(void* data) {
 
   if (args->pipe[1] >= 0) {
     /* Write a character to the main thread to notify it about this. */
-    char c = 0;
-    write(args->pipe[1], &c, 1);
+    ssize_t r;
+
+    do
+      r = write(args->pipe[1], "", 1);
+    while (r == -1 && errno == EINTR);
   }
 
   return NULL;
@@ -159,8 +168,14 @@ static void* dowait(void* data) {
 /* Return 0 if all processes are terminated, -1 on error, -2 on timeout. */
 int process_wait(process_info_t* vec, int n, int timeout) {
   int i;
+  int r;
+  int retval;
   process_info_t* p;
   dowait_args args;
+  pthread_t tid;
+  struct timeval tv;
+  fd_set fds;
+
   args.vec = vec;
   args.n = n;
   args.pipe[0] = -1;
@@ -178,10 +193,7 @@ int process_wait(process_info_t* vec, int n, int timeout) {
    * we'd need to lock vec.
    */
 
-  pthread_t tid;
-  int retval;
-
-  int r = pipe((int*)&(args.pipe));
+  r = pipe((int*)&(args.pipe));
   if (r) {
     perror("pipe()");
     return -1;
@@ -194,11 +206,9 @@ int process_wait(process_info_t* vec, int n, int timeout) {
     goto terminate;
   }
 
-  struct timeval tv;
   tv.tv_sec = timeout / 1000;
   tv.tv_usec = 0;
 
-  fd_set fds;
   FD_ZERO(&fds);
   FD_SET(args.pipe[0], &fds);
 
@@ -251,29 +261,65 @@ long int process_output_size(process_info_t *p) {
 
 /* Copy the contents of the stdio output buffer to `fd`. */
 int process_copy_output(process_info_t *p, int fd) {
-  int r = fseek(p->stdout_file, 0, SEEK_SET);
+  ssize_t nwritten;
+  char buf[1024];
+  int r;
+
+  r = fseek(p->stdout_file, 0, SEEK_SET);
   if (r < 0) {
     perror("fseek");
     return -1;
   }
 
-  ssize_t nread, nwritten;
-  char buf[1024];
+  /* TODO: what if the line is longer than buf */
+  while (fgets(buf, sizeof(buf), p->stdout_file) != NULL) {
+   /* TODO: what if write doesn't write the whole buffer... */
+    nwritten = 0;
 
-  while ((nread = read(fileno(p->stdout_file), buf, 1024)) > 0) {
-    nwritten = write(fd, buf, nread);
-    /* TODO: what if write doesn't write the whole buffer... */
+    if (tap_output)
+      nwritten += write(fd, "#", 1);
+
+    nwritten += write(fd, buf, strlen(buf));
+
     if (nwritten < 0) {
       perror("write");
       return -1;
     }
   }
 
-  if (nread < 0) {
+  if (ferror(p->stdout_file)) {
     perror("read");
     return -1;
   }
 
+  return 0;
+}
+
+
+/* Copy the last line of the stdio output buffer to `buffer` */
+int process_read_last_line(process_info_t *p,
+                           char* buffer,
+                           size_t buffer_len) {
+  char* ptr;
+
+  int r = fseek(p->stdout_file, 0, SEEK_SET);
+  if (r < 0) {
+    perror("fseek");
+    return -1;
+  }
+
+  buffer[0] = '\0';
+
+  while (fgets(buffer, buffer_len, p->stdout_file) != NULL) {
+    for (ptr = buffer; *ptr && *ptr != '\r' && *ptr != '\n'; ptr++);
+    *ptr = '\0';
+  }
+
+  if (ferror(p->stdout_file)) {
+    perror("read");
+    buffer[0] = '\0';
+    return -1;
+  }
   return 0;
 }
 
@@ -309,7 +355,7 @@ void process_cleanup(process_info_t *p) {
 
 
 /* Move the console cursor one line up and back to the first column. */
-void rewind_cursor() {
+void rewind_cursor(void) {
   fprintf(stderr, "\033[2K\r");
 }
 

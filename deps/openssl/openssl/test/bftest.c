@@ -1,1 +1,1 @@
-#include "../crypto/bf/bftest.c"
+../crypto/bf/bftest.c

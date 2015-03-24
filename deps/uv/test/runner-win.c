@@ -43,7 +43,12 @@
 
 
 /* Do platform-specific initialization. */
-void platform_init(int argc, char **argv) {
+int platform_init(int argc, char **argv) {
+  const char* tap;
+
+  tap = getenv("UV_TAP_OUTPUT");
+  tap_output = (tap != NULL && atoi(tap) > 0);
+
   /* Disable the "application crashed" popup. */
   SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX |
       SEM_NOOPENFILEERRORBOX);
@@ -61,6 +66,8 @@ void platform_init(int argc, char **argv) {
   setvbuf(stderr, NULL, _IONBF, 0);
 
   strcpy(executable_path, argv[0]);
+
+  return 0;
 }
 
 
@@ -105,7 +112,9 @@ int process_start(char *name, char *part, process_info_t *p, int is_helper) {
   if (!SetHandleInformation(nul, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT))
     goto error;
 
-  result = GetModuleFileNameW(NULL, (WCHAR*)&image, sizeof(image) / sizeof(WCHAR));
+  result = GetModuleFileNameW(NULL,
+                              (WCHAR*) &image,
+                              sizeof(image) / sizeof(WCHAR));
   if (result == 0 || result == sizeof(image))
     goto error;
 
@@ -207,16 +216,81 @@ long int process_output_size(process_info_t *p) {
 int process_copy_output(process_info_t *p, int fd) {
   DWORD read;
   char buf[1024];
+  char *line, *start;
 
-  if (SetFilePointer(p->stdio_out, 0, 0, FILE_BEGIN) == INVALID_SET_FILE_POINTER)
+  if (SetFilePointer(p->stdio_out,
+                     0,
+                     0,
+                     FILE_BEGIN) == INVALID_SET_FILE_POINTER) {
     return -1;
+  }
+
+  if (tap_output)
+    write(fd, "#", 1);
 
   while (ReadFile(p->stdio_out, (void*)&buf, sizeof(buf), &read, NULL) &&
-         read > 0)
-    write(fd, buf, read);
+         read > 0) {
+    if (tap_output) {
+      start = buf;
+
+      while ((line = strchr(start, '\n')) != NULL) {
+        write(fd, start, line - start + 1);
+        write(fd, "#", 1);
+        start = line + 1;
+      }
+
+      if (start < buf + read)
+        write(fd, start, buf + read - start);
+    } else {
+      write(fd, buf, read);
+    }
+  }
+
+  if (tap_output)
+    write(fd, "\n", 1);
 
   if (GetLastError() != ERROR_HANDLE_EOF)
     return -1;
+
+  return 0;
+}
+
+
+int process_read_last_line(process_info_t *p,
+                           char * buffer,
+                           size_t buffer_len) {
+  DWORD size;
+  DWORD read;
+  DWORD start;
+  OVERLAPPED overlapped;
+
+  ASSERT(buffer_len > 0);
+
+  size = GetFileSize(p->stdio_out, NULL);
+  if (size == INVALID_FILE_SIZE)
+    return -1;
+
+  if (size == 0) {
+    buffer[0] = '\0';
+    return 1;
+  }
+
+  memset(&overlapped, 0, sizeof overlapped);
+  if (size >= buffer_len)
+    overlapped.Offset = size - buffer_len - 1;
+
+  if (!ReadFile(p->stdio_out, buffer, buffer_len - 1, &read, &overlapped))
+    return -1;
+
+  for (start = read - 1; start >= 0; start--) {
+    if (buffer[start] == '\n' || buffer[start] == '\r')
+      break;
+  }
+
+  if (start > 0)
+    memmove(buffer, buffer + start, read - start);
+
+  buffer[read - start] = '\0';
 
   return 0;
 }
@@ -271,8 +345,13 @@ static int clear_line() {
   if (!SetConsoleCursorPosition(handle, coord))
     return -1;
 
-  if (!FillConsoleOutputCharacterW(handle, 0x20, info.dwSize.X, coord, &written))
+  if (!FillConsoleOutputCharacterW(handle,
+                                   0x20,
+                                   info.dwSize.X,
+                                   coord,
+                                   &written)) {
     return -1;
+  }
 
   return 0;
 }

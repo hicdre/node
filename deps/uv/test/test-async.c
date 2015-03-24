@@ -35,7 +35,7 @@ static int prepare_cb_called;
 static int close_cb_called;
 
 
-void thread_cb(void *arg) {
+static void thread_cb(void *arg) {
   int n;
   int r;
 
@@ -75,11 +75,10 @@ static void close_cb(uv_handle_t* handle) {
 }
 
 
-static void async_cb(uv_async_t* handle, int status) {
+static void async_cb(uv_async_t* handle) {
   int n;
 
   ASSERT(handle == &async);
-  ASSERT(status == 0);
 
   uv_mutex_lock(&mutex);
   n = ++async_cb_called;
@@ -92,11 +91,10 @@ static void async_cb(uv_async_t* handle, int status) {
 }
 
 
-static void prepare_cb(uv_prepare_t* handle, int status) {
+static void prepare_cb(uv_prepare_t* handle) {
   int r;
 
   ASSERT(handle == &prepare);
-  ASSERT(status == 0);
 
   if (prepare_cb_called++)
     return;
@@ -122,7 +120,7 @@ TEST_IMPL(async) {
   r = uv_async_init(uv_default_loop(), &async, async_cb);
   ASSERT(r == 0);
 
-  r = uv_run(uv_default_loop());
+  r = uv_run(uv_default_loop(), UV_RUN_DEFAULT);
   ASSERT(r == 0);
 
   ASSERT(prepare_cb_called > 0);

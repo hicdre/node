@@ -1,1 +1,1 @@
-#include "../crypto/sha/sha1test.c"
+../crypto/sha/sha1test.c

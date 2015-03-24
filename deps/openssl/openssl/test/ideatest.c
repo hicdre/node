@@ -1,1 +1,1 @@
-#include "../crypto/idea/ideatest.c"
+../crypto/idea/ideatest.c

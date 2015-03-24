@@ -1,1 +1,1 @@
-#include "../crypto/ecdsa/ecdsatest.c"
+../crypto/ecdsa/ecdsatest.c

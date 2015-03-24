@@ -1,1 +1,1 @@
-#include "../crypto/rsa/rsa_test.c"
+../crypto/rsa/rsa_test.c
